@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Missing Work Helper</title>
+<style>
+  :root {
+    --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --card: #fff;
+    --line: #e7e5e4; --accent: #2563eb; --bad: #b91c1c; --badbg: #fef2f2;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  #drop { display: block; border: 2px dashed var(--line); border-radius: 10px; padding: 28px; text-align: center; cursor: pointer; }
+  #drop.over { border-color: var(--accent); background: #eff6ff; }
+  #drop input { display: none; }
+  .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 24px; }
+  .settings label { display: block; }
+  .settings .head { font-weight: 600; margin-bottom: 4px; }
+  input[type=number] { width: 80px; padding: 4px 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .85rem; color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.name { white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .missing-list { color: var(--muted); font-size: .9rem; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  pre { background: #f5f5f4; padding: 12px; border-radius: 6px; overflow: auto; max-height: 320px; font-size: .8rem; }
+  .hidden { display: none; }
+  .err { color: var(--bad); background: var(--badbg); padding: 8px 12px; border-radius: 6px; }
+  .table-wrap { overflow-x: auto; }
+  @media print {
+    body { background: #fff; }
+    .no-print { display: none !important; }
+    .card { border: none; padding: 0; page-break-inside: auto; }
+    #failingCard { page-break-before: always; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Missing Work Helper</h1>
+  <p class="sub no-print">Load a gradebook CSV export. Everything runs in your browser, so the file is never uploaded anywhere.</p>
+
+  <div class="card no-print">
+    <label id="drop">
+      <input type="file" id="file" accept=".csv,text/csv">
+      <strong>Drop gradebook CSV here</strong> or click to choose a file
+      <div id="fileName" class="sub" style="margin:6px 0 0"></div>
+    </label>
+    <p id="error" class="err hidden"></p>
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="card no-print">
+      <h2>Settings</h2>
+      <div class="settings">
+        <div>
+          <div class="head">Failing cutoff</div>
+          <label>Overall below <input type="number" id="cutoff" value="60" min="0" max="100" step="0.5"></label>
+        </div>
+        <div>
+          <div class="head">Counts as missing</div>
+          <label><input type="checkbox" checked disabled> Missing</label>
+          <label><input type="checkbox" id="countAbsent" checked> Absent</label>
+        </div>
+        <div>
+          <div class="head">Categories</div>
+          <div id="categories"></div>
+        </div>
+        <div>
+          <div class="head">Print copies for</div>
+          <label><input type="radio" name="scope" value="all" checked> All students</label>
+          <label><input type="radio" name="scope" value="failing"> Failing students only</label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:16px">
+        <button class="primary" onclick="window.print()">Print</button>
+        <button id="dlJson">Download JSON</button>
+        <button id="dlYaml">Download YAML</button>
+      </div>
+    </div>
+
+    <div class="card" id="printCard">
+      <h2>Copies to print <span id="printTotal" class="sub"></span></h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Assignment</th><th>Category</th><th>Due</th><th class="num">Copies</th></tr></thead>
+        <tbody id="printBody"></tbody>
+      </table></div>
+    </div>
+
+    <div class="card" id="failingCard">
+      <h2>Failing students <span id="failTotal" class="sub"></span></h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Student</th><th class="num">Overall</th><th>Missing work</th></tr></thead>
+        <tbody id="failBody"></tbody>
+      </table></div>
+    </div>
+
+    <div class="card no-print">
+      <h2>Failing students → missing work (JSON)</h2>
+      <pre id="jsonPreview"></pre>
+    </div>
+  </div>
+</main>
+
+<script>
+// ---------- CSV parsing (RFC 4180: quoted fields, "" escapes, CRLF) ----------
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', i = 0, inQuotes = false;
+  if (text.charCodeAt(0) === 0xFEFF) i = 1; // strip BOM
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+// ---------- Gradebook model ----------
+const ASSIGNMENT_RE = /^(.*) \(Max Points: ([\d.]+), Due Date: ([^,]+), Grading Category: (.+)\)$/;
+
+function parseGradebook(text) {
+  const rows = parseCSV(text);
+  if (rows.length < 2) throw new Error('The file has no student rows.');
+  const header = rows[0];
+  const col = name => header.indexOf(name);
+  const iFirst = col('First Name'), iLast = col('Last Name'), iId = col('Unique User ID'), iOverall = col('Overall');
+  if (iFirst < 0 || iLast < 0 || iOverall < 0)
+    throw new Error('Could not find "First Name", "Last Name" and "Overall" columns. Is this a gradebook export?');
+
+  const assignments = [];
+  header.forEach((h, idx) => {
+    const m = h.match(ASSIGNMENT_RE);
+    if (!m) return;
+    const due = m[3].split(' ')[0];
+    assignments.push({ idx, name: m[1], maxPoints: Number(m[2]), due, dueSort: dateKey(due), category: m[4] });
+  });
+  if (!assignments.length) throw new Error('No assignment columns found.');
+
+  // Names like "HW" or "ET" repeat, so label duplicates with their due date.
+  const nameCount = {};
+  assignments.forEach(a => nameCount[a.name] = (nameCount[a.name] || 0) + 1);
+  assignments.forEach(a => a.label = nameCount[a.name] > 1 ? `${a.name} (due ${a.due})` : a.name);
+
+  const students = rows.slice(1)
+    .filter(r => r.length > iOverall && (r[iFirst] || r[iLast]))
+    .map(r => ({
+      first: r[iFirst].trim(),
+      last: r[iLast].trim(),
+      id: iId >= 0 ? r[iId] : '',
+      overall: parseFloat(r[iOverall]),
+      statuses: assignments.map(a => (r[a.idx] || '').trim()),
+    }));
+  return { assignments, students };
+}
+
+function dateKey(mdy) {
+  const [m, d, y] = mdy.split('/').map(Number);
+  return ((y < 100 ? 2000 + y : y) * 100 + m) * 100 + d;
+}
+
+// ---------- Analysis ----------
+let gradebook = null;
+
+function settings() {
+  return {
+    cutoff: parseFloat(document.getElementById('cutoff').value),
+    countAbsent: document.getElementById('countAbsent').checked,
+    categories: new Set([...document.querySelectorAll('#categories input:checked')].map(i => i.value)),
+    scope: document.querySelector('input[name=scope]:checked').value,
+  };
+}
+
+function analyze({ assignments, students }, s) {
+  const isMissing = v => v === 'Missing' || (s.countAbsent && v === 'Absent');
+  const isFailing = st => !isNaN(st.overall) && st.overall < s.cutoff;
+
+  const studentMissing = students.map(st =>
+    assignments.filter((a, j) => s.categories.has(a.category) && isMissing(st.statuses[j])));
+
+  const copies = assignments.map((a, j) => ({
+    assignment: a,
+    count: students.filter((st, k) =>
+      (s.scope === 'all' || isFailing(st)) && studentMissing[k].includes(a)).length,
+  })).filter(c => c.count > 0)
+    .sort((x, y) => y.count - x.count || x.assignment.dueSort - y.assignment.dueSort);
+
+  const failing = students
+    .map((st, k) => ({ ...st, missing: studentMissing[k] }))
+    .filter(isFailing)
+    .sort((x, y) => x.overall - y.overall);
+
+  const mapping = failing.map(st => ({
+    name: `${st.first} ${st.last}`,
+    id: st.id,
+    overall: st.overall,
+    missing: st.missing.map(a => ({
+      assignment: a.name, due: a.due, category: a.category, maxPoints: a.maxPoints,
+      status: st.statuses[gradebook.assignments.indexOf(a)],
+    })),
+  }));
+  return { copies, failing, mapping };
+}
+
+// ---------- Rendering ----------
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function render() {
+  if (!gradebook) return;
+  const { copies, failing, mapping } = analyze(gradebook, settings());
+
+  const totalCopies = copies.reduce((n, c) => n + c.count, 0);
+  document.getElementById('printTotal').textContent = `· ${copies.length} assignments, ${totalCopies} copies`;
+  document.getElementById('printBody').innerHTML = copies.length
+    ? copies.map(c => `<tr><td>${esc(c.assignment.label)}</td><td>${esc(c.assignment.category)}</td>
+        <td>${esc(c.assignment.due)}</td><td class="num"><strong>${c.count}</strong></td></tr>`).join('')
+    : '<tr><td colspan="4" class="sub">Nothing to print.</td></tr>';
+
+  document.getElementById('failTotal').textContent = `· ${failing.length} of ${gradebook.students.length}`;
+  document.getElementById('failBody').innerHTML = failing.length
+    ? failing.map(st => `<tr><td class="name">${esc(st.last)}, ${esc(st.first)}</td>
+        <td class="num bad">${st.overall.toFixed(1)}</td>
+        <td class="missing-list">${st.missing.length ? st.missing.map(a => esc(a.label)).join(', ') : '-'}</td></tr>`).join('')
+    : '<tr><td colspan="3" class="sub">No failing students.</td></tr>';
+
+  document.getElementById('jsonPreview').textContent = JSON.stringify(mapping, null, 2);
+  currentMapping = mapping;
+}
+
+let currentMapping = [];
+
+// ---------- YAML output (strings double-quoted, which is always valid YAML) ----------
+function toYAML(students) {
+  const q = v => typeof v === 'number' ? String(v) : JSON.stringify(String(v));
+  return students.map(st => {
+    let out = `- name: ${q(st.name)}\n  id: ${q(st.id)}\n  overall: ${q(st.overall)}\n`;
+    if (!st.missing.length) return out + '  missing: []\n';
+    out += '  missing:\n';
+    for (const m of st.missing)
+      out += `    - assignment: ${q(m.assignment)}\n      due: ${q(m.due)}\n      category: ${q(m.category)}\n` +
+             `      maxPoints: ${q(m.maxPoints)}\n      status: ${q(m.status)}\n`;
+    return out;
+  }).join('') || '[]\n';
+}
+
+function download(filename, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const stamp = () => new Date().toISOString().slice(0, 10);
+document.getElementById('dlJson').onclick = () =>
+  download(`failing-missing-${stamp()}.json`, JSON.stringify(currentMapping, null, 2), 'application/json');
+document.getElementById('dlYaml').onclick = () =>
+  download(`failing-missing-${stamp()}.yaml`, toYAML(currentMapping), 'text/yaml');
+
+// ---------- File loading ----------
+const DEFAULT_CATEGORIES = ['Homework', 'Classwork'];
+
+function load(file) {
+  const errBox = document.getElementById('error');
+  errBox.classList.add('hidden');
+  document.getElementById('fileName').textContent = file.name;
+  file.text().then(text => {
+    gradebook = parseGradebook(text);
+    const cats = [...new Set(gradebook.assignments.map(a => a.category))];
+    document.getElementById('categories').innerHTML = cats.map(c =>
+      `<label><input type="checkbox" value="${esc(c)}" ${DEFAULT_CATEGORIES.includes(c) ? 'checked' : ''}> ${esc(c)}</label>`).join('');
+    document.getElementById('results').classList.remove('hidden');
+    render();
+  }).catch(e => {
+    gradebook = null;
+    document.getElementById('results').classList.add('hidden');
+    errBox.textContent = e.message;
+    errBox.classList.remove('hidden');
+  });
+}
+
+const drop = document.getElementById('drop');
+document.getElementById('file').onchange = e => e.target.files[0] && load(e.target.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); e.dataTransfer.files[0] && load(e.dataTransfer.files[0]); };
+document.getElementById('results').addEventListener('input', render);
+</script>
+</body>
+</html>

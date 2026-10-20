@@ -1,0 +1,2 @@
+# Ignore gradebook exports so student data never gets committed
+*.csv
